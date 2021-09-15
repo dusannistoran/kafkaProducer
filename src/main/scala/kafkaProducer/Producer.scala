@@ -1,31 +1,55 @@
 package kafkaProducer
 
-import java.util.Properties
-
-import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
-import org.apache.kafka.common.serialization.StringSerializer
-
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructType}
+import org.slf4j.LoggerFactory
+import java.io.File
 
 class Producer(topic: String, brokers: String) {
 
-  val producer = new KafkaProducer[String, String](configuration)
+  val spark = SparkSession
+    .builder()
+    .master("local")
+    .appName("kafkaProducer")
+    .getOrCreate()
 
-  private def configuration: Properties = {
-    val props = new Properties()
-    props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, brokers)
-    props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getCanonicalName)
-    props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getCanonicalName)
-    props
-  }
+  LoggerFactory.getLogger(spark.getClass)
+  spark.sparkContext.setLogLevel("WARN")
 
-  def sendMessages(): Unit = {
+  val mySchema = StructType(
+    StructField("id", IntegerType) ::
+      StructField("firstName", StringType) ::
+      StructField("lastName", StringType) ::
+      StructField("yearOfBirth", IntegerType) ::
+      StructField("address", StructType(
+        StructField("country", StringType) ::
+          StructField("city", StringType) ::
+          StructField("street", StringType) :: Nil
+      )) ::
+      StructField("gender", StringType) :: Nil
+  )
 
-    val messages: List[String] = List("message1", "message2", "message3")
+  def streamJsonFromFileToKafka(file: String): Unit = {
 
+    val df = spark
+      .readStream
+      .schema(mySchema)
+      .option("multiline", "true")
+      .json(file)
 
-    for (message <- messages) {
-      producer.send(new ProducerRecord[String, String](topic, message))
-    }
+    // write json stream to kafka
+    import org.apache.spark.sql.functions._
+    df.select(to_json(struct("*")).alias("value"))
+
+    df.selectExpr( "to_json(struct(*)) AS value")
+      .writeStream
+      .format("kafka")
+      .outputMode("append")
+      .option("checkpointLocation", "E:\\tmp\\kafkaProducer")
+      .option("kafka.bootstrap.servers", brokers)
+      .option("topic", topic)
+      .start()
+      .awaitTermination()
   }
 
 }
@@ -33,8 +57,11 @@ class Producer(topic: String, brokers: String) {
 object Producer {
 
   def main(args: Array[String]): Unit = {
-
     val producer = new Producer("test-topic", "localhost:9092")
-    producer.sendMessages()
+
+    val fileLocation =
+      new File("./").getCanonicalPath + s"\\src\\main\\resources\\jsonFiles\\*.json"
+
+    producer.streamJsonFromFileToKafka(fileLocation)
   }
 }
